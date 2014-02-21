@@ -1,0 +1,45 @@
+Soleil is an open-source package for the numerical simulation and
+postprocessing of turbulent particle-laden flows with radiation
+
+Currently it is written in Python
+
+Quick start demo: 2D Taylor-Green vortex with particles:
+
+0) Create ../TaylorGreen directory where the output data will be stored.
+
+1) Run soleil
+$ python soleil.py \
+    soleilOptionsTaylorGreen2D.xml \
+    ../TaylorGreen/output
+Output files will be written under the ./TaylorGreen/ directory.
+
+2) Visualize density field on slice with particles superimposed by circles with
+velocity indicated by arrows:
+$ for timeStep in `seq 1 1 100`;do \
+    python plotSoleil.py \
+      ../TaylorGreen/output \
+      $timeStep \
+      1 1e4 10 \
+      ../TaylorGreen/plot; \
+  done
+
+The sequence of plot files will be in the ../TaylorGreen/ directory,
+with the 'plot' file prefix.
+---
+
+    Copyright (C) 2014 Ivan Bermejo-Moreno
+
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 2 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License along
+    with this program; if not, write to the Free Software Foundation, Inc.,
+    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+

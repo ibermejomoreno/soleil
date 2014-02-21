@@ -1,0 +1,49 @@
+<?xml version="1.0" ?>
+<soleil>
+
+  <mesh type="rectilinearGrid">
+    <coorX spacing="uniform" numPoints="16" min="0.0" max="6.283185307179586" type="periodic"></coorX>
+    <coorY spacing="uniform" numPoints="16" min="0.0" max="6.283185307179586" type="periodic"></coorY>
+    <coorZ spacing="uniform" numPoints="1" min="0.0" max="6.283185307179586" type="periodic"></coorZ>
+  </mesh>
+
+  <spatialStencils>
+    <type>central</type>
+    <order>2</order>
+    <split>0.5</split>
+  </spatialStencils>
+
+  <fluid type="gas">
+    <gasConstant>20.4128</gasConstant>
+    <gasGamma>1.4</gasGamma>
+    <dynamicViscosityRef>0.00044</dynamicViscosityRef>
+    <dynamicViscosityTemperatureRef>1.0</dynamicViscosityTemperatureRef>
+    <prandtl>0.7</prandtl>
+  </fluid>
+
+  <flow>
+    <initialCondition type="TaylorGreen">0</initialCondition>
+    <sgsModel type="none"></sgsModel>
+  </flow>
+
+  <particles>
+    <number>50</number>
+    <type>smallParticles</type>
+    <coorX type="random:uniform:0.01:6.27"></coorX>
+    <coorY type="random:uniform:0.01:6.27"></coorY>
+    <coorZ type="constant">0.0</coorZ>
+    <velocityX type="constant">0.0</velocityX>
+    <velocityY type="constant">0.0</velocityY>
+    <velocityZ type="constant">0.0</velocityZ>
+    <diameter type="random:uniform:0.001:0.01"></diameter>
+    <density type="constant">1000.0</density>
+  </particles>
+
+  <timeIntegrator>
+    <type>RungeKutta4</type>
+    <finalTime>1000.0</finalTime>
+    <maxTimeStep>100</maxTimeStep>
+    <cfl>1.0</cfl>
+  </timeIntegrator>
+
+</soleil>
