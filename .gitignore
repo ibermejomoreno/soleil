@@ -1,0 +1,6 @@
+# Ignore swap/temporary editor files
+.*.sw*
+*.a
+*.pyc
+tags
+TAGS
