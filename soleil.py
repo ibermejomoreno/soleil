@@ -30,8 +30,8 @@ Flow solver (based on Johan Larsson's Hybrid code):
 - Fluid: perfect gas
 
 Particles:
-- Lagrangian integration
-- Coupling with flow (currently one-way)
+- Lagrangian tracking
+- Coupling with flow (two-way coupling in momentum and energy)
 
 Time stepping:
 - Runge-Kutta 4
@@ -594,6 +594,19 @@ class Flow:
           flowElement.getElementsByTagName("sgsModel")[0]
         self.sgsModelType = \
           flowSgsModelElement.attributes["type"].value
+        # Body force
+        flowBodyForceElement = \
+          flowElement.getElementsByTagName("bodyForce")[0]
+        bodyForceType = \
+          flowBodyForceElement.attributes["type"].value
+        if bodyForceType == "constant":
+            self.bodyForceType = bodyForceType
+            self.bodyForce = \
+              numpy.array([float(elem) for elem in\
+                flowBodyForceElement.firstChild.data.split()])
+        else:
+            raise RuntimeError('Unknown type of body force: %s',
+                               bodyForceType)
     
         if flowInitialConditionType == "file":
             self.InitFromBinaryFile(flowInitialConditionValue)
@@ -608,7 +621,10 @@ class Flow:
         elif flowInitialConditionType == "dummy":
             self.InitDummy()
         elif flowInitialConditionType == "TaylorGreen":
-            self.InitTaylorGreen()
+            self.InitTaylorGreen(flowInitialConditionValue.split())
+            self.UpdateGhost()
+        elif flowInitialConditionType == "constantPrimitives":
+            self.InitConstantPrimitives(flowInitialConditionValue)
             self.UpdateGhost()
         else:
             raise RuntimeError('Unknown type of flow initialization: %s',
@@ -640,17 +656,16 @@ class Flow:
                     self.rhoVel.data[idx,jdx,kdx,2] = \
                         numpy.sin(self.mesh.coorXWithGhost[idx])
  
-    def InitTaylorGreen(self):
+    def InitTaylorGreen(self,values):
  
         log.info('Initializing flow fields to Taylor-Green vortex fields')
 
-        taylorGreenPressure = 100.0
+        taylorGreenPressure = float(values[0])
         for idx in range(self.mesh.startXdx,self.mesh.endXdx):
             for jdx in range(self.mesh.startYdx,self.mesh.endYdx):
                 for kdx in range(self.mesh.startZdx,self.mesh.endZdx):
                     self.rho.data[idx,jdx,kdx] = \
                         1.0
-                    self.rhoEnergy.data[idx,jdx,kdx] = \
                     self.velocity.data[idx,jdx,kdx,0] = \
                         numpy.sin(self.mesh.coorXWithGhost[idx]) * \
                         numpy.cos(self.mesh.coorYWithGhost[jdx]) * \
@@ -666,6 +681,24 @@ class Flow:
                               numpy.cos(2.0*self.mesh.coorYWithGhost[jdx])
                     self.pressure.data[idx,jdx,kdx] = \
                         taylorGreenPressure + (factorA*factorB - 2.0) / 16.0
+
+        self.UpdateConservedFromPrimitive()
+ 
+    def InitConstantPrimitives(self,flowInitialConditionValue):
+ 
+        log.info('Initializing flow fields to constant values')
+
+        taylorGreenPressure = 100.0
+        for idx in range(self.mesh.startXdx,self.mesh.endXdx):
+            for jdx in range(self.mesh.startYdx,self.mesh.endYdx):
+                for kdx in range(self.mesh.startZdx,self.mesh.endZdx):
+                    self.rho.data[idx,jdx,kdx] = \
+                      float(flowInitialConditionValue.split()[0])
+                    self.velocity.data[idx,jdx,kdx,:] = \
+                      numpy.array([float(elem) for elem in \
+                        flowInitialConditionValue.split()[1:4]])
+                    self.pressure.data[idx,jdx,kdx] = \
+                      float(flowInitialConditionValue.split()[4])
 
         self.UpdateConservedFromPrimitive()
  
@@ -1530,6 +1563,51 @@ class Flow:
                       dZInv * ( rhoEnergyFlux.data[idx,jdx,kdx] - \
                                 rhoEnergyFlux.data[idx-1,jdx,kdx-1] )
 
+
+    def AddBodyForces(self, rho_t, rhoVel_t, rhoEnergy_t):
+        '''Add body forces to momentum equation'''
+
+        for kdx in range(self.mesh.startZdx,self.mesh.endZdx):
+            for idx in range(self.mesh.startXdx,self.mesh.endXdx):
+                for jdx in range(self.mesh.startYdx,self.mesh.endYdx):
+                    rhoVel_t.data[idx,jdx,kdx,:] += \
+                      self.rho.data[idx,jdx,kdx] * \
+                      self.bodyForce[:]
+
+
+    def AddParticleCoupling(self, rho_t, rhoVel_t, rhoEnergy_t, particles):
+        '''Add particle to flow coupling terms to time derivative 
+           of conserved flow fields'''
+
+        # WARNING: requires updated particles (deltaVelocityOverRelaxationTime
+        # and deltaTemperatureTerm)
+
+        for particleIdx in range(particles.number):
+            if particles.particlesType == 'flowTracer':
+                # Flow tracer
+                pass
+            elif particles.particlesType == 'smallParticlesStokes' or \
+                 particles.particlesType == 'smallParticles':
+                # Solid particles
+                particleMass = \
+                  numpy.pi * particles.diameter[particleIdx]**3 / 6.0 * \
+                  particles.density[particleIdx]
+                rhoVel_t.data[particles.cellIndices[particleIdx,0],
+                              particles.cellIndices[particleIdx,1],
+                              particles.cellIndices[particleIdx,2],
+                              :] += \
+                  - particleMass * \
+                    particles.deltaVelocityOverRelaxationTime[particleIdx]
+                rhoEnergy_t.data[particles.cellIndices[particleIdx,0],
+                                 particles.cellIndices[particleIdx,1],
+                                 particles.cellIndices[particleIdx,2]] += \
+                  - particles.deltaTemperatureTerm[particleIdx]
+            else:
+                raise RuntimeError('Unknown particles type %s',
+                                   particles.particlesType)
+
+
+
     def UpdateAuxiliaryVelocity(self):
         '''Update auxiliary variables related to velocity'''
 
@@ -1645,6 +1723,14 @@ def InterpolateFields(fields,mesh,pointCoordinates,
 
         except:
             raise RuntimeError('Wrong indices')
+        # Find indices of nearest (to the left = floor) 
+        floorXdx = numpy.argmin(\
+          numpy.ma.masked_less(pointCoordinates[0]-mesh.coorXWithGhost,0.0))
+        floorYdx = numpy.argmin(\
+          numpy.ma.masked_less(pointCoordinates[1]-mesh.coorYWithGhost,0.0))
+        floorZdx = numpy.argmin(\
+          numpy.ma.masked_less(pointCoordinates[2]-mesh.coorZWithGhost,0.0))
+        floorIndices = [floorXdx, floorYdx, floorZdx]
     elif interpolationType == "trilinear":
         # Find indices of nearest (to the left = floor) 
         # mesh point to requested point
@@ -1654,6 +1740,7 @@ def InterpolateFields(fields,mesh,pointCoordinates,
           numpy.ma.masked_less(pointCoordinates[1]-mesh.coorYWithGhost,0.0))
         floorZdx = numpy.argmin(\
           numpy.ma.masked_less(pointCoordinates[2]-mesh.coorZWithGhost,0.0))
+        floorIndices = [floorXdx, floorYdx, floorZdx]
         factorXdx = (pointCoordinates[0] - \
                      mesh.coorXWithGhost[floorXdx])/\
                     mesh.deltaX[floorXdx]
@@ -1718,7 +1805,7 @@ def InterpolateFields(fields,mesh,pointCoordinates,
             raise RuntimeError('Wrong indices')
     else:
         raise RuntimeError('Interpolation type not implemented')
-    return interpolatedData
+    return floorIndices, interpolatedData
 
 # Particles
 
@@ -1726,10 +1813,12 @@ def Init1DArray(array, number):
 
     if type(array) == float:
         arrayOut = numpy.ones(number)*array
+    elif type(array) == int:
+        arrayOut = numpy.ones(number,dtype=numpy.int)*array
     elif type(array) == numpy.ndarray:
         if len(array) != number:
             raise RuntimeError('Lenght of array (%d) '
-                               ' differs from number of particles (%d)', 
+                               ' differs from number of elements (%d)', 
                                len(array), number)
         else:
             arrayOut = array
@@ -1754,12 +1843,10 @@ def Init3DArray(arrayXIn, arrayYIn, arrayZIn, number):
     arrayX = Init1DArray(arrayXIn, number)
     arrayY = Init1DArray(arrayYIn, number)
     arrayZ = Init1DArray(arrayZIn, number)
-
-    arrayOut = numpy.empty((number,3))
+    arrayOut = numpy.empty((number,3),dtype=type(arrayX[0]))
     arrayOut[:,0] = arrayX[:]
     arrayOut[:,1] = arrayY[:]
     arrayOut[:,2] = arrayZ[:]
-
     return arrayOut
 
 class ParticleDistribution:
@@ -1768,26 +1855,39 @@ class ParticleDistribution:
     def __init__(self, number, type,
                  coorX, coorY, coorZ,
                  velocityX, velocityY, velocityZ,
-                 diameter, density):
+                 temperature, diameter, density,
+                 bodyForceType, bodyForce,
+                 heatCapacity, convectionCoefficient):
 
         log.info('Initializing particle distribution')
 
         self.number = number
 
         self.particlesType = type
-         
-        self.position = Init3DArray(coorX,coorY,coorZ,number)
-        self.velocity = Init3DArray(velocityX,velocityY,velocityZ,number)
+        self.position    = Init3DArray(coorX,coorY,coorZ,number)
+        self.velocity    = Init3DArray(velocityX,velocityY,velocityZ,number)
+        self.temperature = Init1DArray(temperature,number)
 
         self.diameter = Init1DArray(diameter,number)
-        self.density = Init1DArray(density,number)
+        self.density  = Init1DArray(density,number)
+
+        self.deltaVelocityOverRelaxationTime = Init3DArray(0.0, 0.0, 0.0, number)
+        self.deltaTemperatureTerm = Init1DArray(0.0, number)
+
+        self.cellIndices = Init3DArray(0,0,0,number)
+
+        self.bodyForceType = bodyForceType
+        self.bodyForce = bodyForce
+
+        self.heatCapacity = heatCapacity
+        self.convectionCoefficient = convectionCoefficient
 
     def SetVelocitiesToFlow(self, flow):
 
         # Calculate fluid flow velocity at particle positions
         for particleIdx in range(self.number):
             # Interpolate flow quantities at given point
-            [flowVelocity] = \
+            cellIndices, [flowVelocity] = \
               InterpolateFields(\
                 [flow.velocity],flow.mesh,
                 self.position[particleIdx,:],interpolationType='trilinear')
@@ -1795,11 +1895,12 @@ class ParticleDistribution:
             # Kinematics
             self.velocity[particleIdx,:] = flowVelocity
 
-    def AddFlowCoupling(self, position_t, velocity_t, flow):
+    def AddFlowCoupling(self, position_t, velocity_t, temperature_t, flow):
 
         # Calculate fluid flow velocity at particle positions
         for particleIdx in range(self.number):
             # Interpolate flow quantities at given point
+            self.cellIndices[particleIdx,:], \
             [flowDensity, flowVelocity, flowTemperature] = \
               InterpolateFields(\
                 [flow.rho, flow.velocity, flow.temperature],flow.mesh,
@@ -1814,19 +1915,78 @@ class ParticleDistribution:
                 position_t[particleIdx,:] += flowVelocity
                 # - Momentum equation (no inertia for flow tracer)
                 velocity_t[particleIdx,:] += 0.0
-            elif self.particlesType == 'smallParticles':
+                temperature_t[particleIdx] += 0.0                  
+            elif self.particlesType == 'smallParticlesStokes':
                 # Solid particles
                 # - Kinematics
                 position_t[particleIdx,:] += self.velocity[particleIdx,:]
                 # - Momentum equation (Portela and Oliemans 2003)
+                relaxationTime = \
+                  ( self.density[particleIdx] * self.diameter[particleIdx]**2 / \
+                    (18.0 * flowDynamicViscosity) )
+                self.deltaVelocityOverRelaxationTime[particleIdx,:] = \
+                  (flowVelocity - self.velocity[particleIdx,:]) / \
+                  relaxationTime
                 velocity_t[particleIdx,:] += \
-                  18.0 * numpy.pi * flowDynamicViscosity / \
-                  (self.density[particleIdx] * \
-                   self.diameter[particleIdx]**2) * \
-                  (flowVelocity - self.velocity[particleIdx,:])
+                  self.deltaVelocityOverRelaxationTime[particleIdx,:]
+                # - Temperature (energy) equation
+                particleMass = \
+                  numpy.pi * self.density[particleIdx] * \
+                  self.diameter[particleIdx]**3 / 6.0
+                self.deltaTemperatureTerm[particleIdx] = \
+                  numpy.pi * self.diameter[particleIdx]**2 * \
+                  self.convectionCoefficient * \
+                  (flowTemperature - self.temperature[particleIdx]) 
+                temperature_t[particleIdx] += \
+                  self.deltaTemperatureTerm[particleIdx]/\
+                  (particleMass * self.heatCapacity)
+            elif self.particlesType == 'smallParticles':
+                # Solid particles
+                # - Kinematics
+                position_t[particleIdx,:] += self.velocity[particleIdx,:]
+                # - Momentum equation (includes Reynolds number correction in
+                # the relaxation time)
+                deltaVelocityMagnitude = \
+                  numpy.linalg.norm(flowVelocity - \
+                                    self.velocity[particleIdx,:])
+                particleReynoldsNumber = \
+                  (self.density[particleIdx] * deltaVelocityMagnitude * \
+                   self.diameter[particleIdx]) / flowDynamicViscosity
+                relaxationTime = \
+                  ( self.density[particleIdx] * self.diameter[particleIdx]**2 / \
+                    (18.0 * flowDynamicViscosity) ) / \
+                  ( 1.0 + 0.15 * particleReynoldsNumber**0.687 )
+                self.deltaVelocityOverRelaxationTime[particleIdx,:] = \
+                  (flowVelocity - self.velocity[particleIdx,:]) / \
+                  relaxationTime
+                velocity_t[particleIdx,:] += \
+                  self.deltaVelocityOverRelaxationTime[particleIdx,:]
+                # - Temperature (energy) equation
+                particleMass = \
+                  numpy.pi * self.density[particleIdx] * \
+                  self.diameter[particleIdx]**3 / 6.0
+                self.deltaTemperatureTerm[particleIdx] = \
+                  numpy.pi * self.diameter[particleIdx]**2 * \
+                  self.convectionCoefficient * \
+                  (flowTemperature - self.temperature[particleIdx]) 
+                temperature_t[particleIdx] += \
+                  self.deltaTemperatureTerm[particleIdx]/\
+                  (particleMass * self.heatCapacity)
             else:
                 raise RuntimeError('Unknown particles type %s',
                                    self.particlesType)
+
+    def AddBodyForces(self, velocity_t):
+
+        # Calculate fluid flow velocity at particle positions
+        for particleIdx in range(self.number):
+            # Update time derivative of position for this particle
+            if self.bodyForceType == "constant":
+                # - Momentum equation 
+                velocity_t[particleIdx,:] += self.bodyForce
+            else:
+                raise RuntimeError('Unknown particles body force type %s',
+                                   self.bodyForceType)
 
     def UpdateAuxiliary(self,flow):
 
@@ -1869,7 +2029,7 @@ class ParticleDistribution:
             outFile.write("# ID diameter density "
                           "coorX coorY coorZ "
                           "velocityX velocityY velocityZ "
-                          "velocityX velocityY velocityZ ")
+                          "temperature\n")
             for ndx in range(self.number):
                 outFile.write(str(ndx) + " " + \
                               str(self.diameter[ndx]) + " " + \
@@ -1879,7 +2039,8 @@ class ParticleDistribution:
                               str(self.position[ndx,2]) + " " + \
                               str(self.velocity[ndx,0]) + " " + \
                               str(self.velocity[ndx,1]) + " " + \
-                              str(self.velocity[ndx,2]) + "\n")
+                              str(self.velocity[ndx,2]) + " " + \
+                              str(self.temperature[ndx]) + "\n")
             outFile.write("\n")
 
 class Mesh:
@@ -2186,6 +2347,7 @@ class TimeIntegrator:
         # Particles
         #   dFunctionDtArray[3] - particlesPosition_t
         #   dFunctionDtArray[4] - particlesVelocity_t
+        #   dFunctionDtArray[5] - particlesTemperature_t
 
         #log.info('Computing DFunctionDt in time stepper')
         # Reset to zero
@@ -2194,6 +2356,7 @@ class TimeIntegrator:
         dFunctionDtArray[2].SetToConstant(0.0)
         dFunctionDtArray[3].fill(0.0)
         dFunctionDtArray[4].fill(0.0)
+        dFunctionDtArray[5].fill(0.0)
             
         ## Flow field
         # Add inviscid terms
@@ -2212,13 +2375,6 @@ class TimeIntegrator:
           dFunctionDtArray[1], \
           dFunctionDtArray[2])
 
-        # Add particle coupling on fluid flow
-        # self.flow.AddParticleCoupling(
-        #  dFunctionDtArray[0], \
-        #  dFunctionDtArray[1], \
-        #  dFunctionDtArray[2],
-        #  self.particles)
-
         # Add radiation
         # self.flow.AddRadiation(
         #  dFunctionDtArray[0], \
@@ -2227,22 +2383,31 @@ class TimeIntegrator:
         #  self.particles)
 
         # Add body forces (e.g. gravity)
-        # self.flow.AddBodyForces(
-        #  dFunctionDtArray[0], \
-        #  dFunctionDtArray[1], \
-        #  dFunctionDtArray[2],
-        #  self.particles)
+        self.flow.AddBodyForces(
+         dFunctionDtArray[0], \
+         dFunctionDtArray[1], \
+         dFunctionDtArray[2])
 
+        # Flow-particle coupling is currently split into two functions
+        # one for each way of coupling for conceptual abstraction.
+        # Note that they can be combined into one, saving memory
+        # and computational time.
         # Add flow coupling to particles
         self.particles.AddFlowCoupling(
           dFunctionDtArray[3],
           dFunctionDtArray[4],
+          dFunctionDtArray[5],
           self.flow)
+        # Add particle coupling on fluid flow
+        self.flow.AddParticleCoupling(
+          dFunctionDtArray[0], \
+          dFunctionDtArray[1], \
+          dFunctionDtArray[2],
+          self.particles)
 
-        ## Add body forces to particles
-        #self.particles.AddBodyForces(
-        # dFunctionDtArray[3], \
-        # self.flow)
+        # Add body forces to particles
+        self.particles.AddBodyForces(
+         dFunctionDtArray[4])
 
         # etc.
         
@@ -2295,34 +2460,41 @@ class TimeIntegrator:
 
         # Set-up additional fields
         # Old
-        rho_old       = self.flow.rho.Copy() 
-        rhoVel_old    = self.flow.rhoVel.Copy() 
-        rhoEnergy_old = self.flow.rhoEnergy.Copy()
-        particlesPosition_old = self.particles.position.copy()
-        particlesVelocity_old = self.particles.velocity.copy()
+        rho_old                  = self.flow.rho.Copy() 
+        rhoVel_old               = self.flow.rhoVel.Copy() 
+        rhoEnergy_old            = self.flow.rhoEnergy.Copy()
+        particlesPosition_old    = self.particles.position.copy()
+        particlesVelocity_old    = self.particles.velocity.copy()
+        particlesTemperature_old = self.particles.temperature.copy()
         # New
-        rho_new       = self.flow.rho.Copy() 
-        rhoVel_new    = self.flow.rhoVel.Copy() 
-        rhoEnergy_new = self.flow.rhoEnergy.Copy()
-        particlesPosition_new = self.particles.position.copy()
-        particlesVelocity_new = self.particles.velocity.copy()
+        rho_new                  = self.flow.rho.Copy() 
+        rhoVel_new               = self.flow.rhoVel.Copy() 
+        rhoEnergy_new            = self.flow.rhoEnergy.Copy()
+        particlesPosition_new    = self.particles.position.copy()
+        particlesVelocity_new    = self.particles.velocity.copy()
+        particlesTemperature_new = self.particles.temperature.copy()
         # Time derivative
-        rho_t         = Field(self.flow.mesh,1)
-        rhoVel_t      = Field(self.flow.mesh,3)
-        rhoEnergy_t   = Field(self.flow.mesh,1)
-        particlesPosition_t = numpy.empty((self.particles.number,3))
-        particlesVelocity_t = numpy.empty((self.particles.number,3))
+        rho_t                  = Field(self.flow.mesh,1)
+        rhoVel_t               = Field(self.flow.mesh,3)
+        rhoEnergy_t            = Field(self.flow.mesh,1)
+        particlesPosition_t    = numpy.empty((self.particles.number,3))
+        particlesVelocity_t    = numpy.empty((self.particles.number,3))
+        particlesTemperature_t = numpy.empty((self.particles.number))
 
         # Pack into arrays
         oldArray         = [rho_old, rhoVel_old, rhoEnergy_old,
-                             particlesPosition_old, particlesVelocity_old]
+                            particlesPosition_old, particlesVelocity_old,
+                            particlesTemperature_old]
         newArray         = [rho_new, rhoVel_new, rhoEnergy_new,
-                            particlesPosition_new, particlesVelocity_new]
+                            particlesPosition_new, particlesVelocity_new,
+                            particlesTemperature_new]
         dFunctionDtArray = [rho_t, rhoVel_t, rhoEnergy_t,
-                            particlesPosition_t, particlesVelocity_t]
+                            particlesPosition_t, particlesVelocity_t,
+                            particlesTemperature_t]
         solutionArray    = \
           [self.flow.rho, self.flow.rhoVel, self.flow.rhoEnergy,
-           self.particles.position, self.particles.velocity]
+           self.particles.position, self.particles.velocity,
+           self.particles.temperature]
  
         # Apply time-stepping
         timeOld = self.simulationTime
@@ -2385,82 +2557,113 @@ class SolverOptions:
         # Type of particles
         self.particlesType = \
           particlesElement.getElementsByTagName("type")[0].firstChild.data
-        # Coordinates
+        # Initial conditions
+        particlesInitialConditionElement= \
+          particlesElement.getElementsByTagName("initialCondition")[0]
+        # - Coordinates
         particlesCoorXType = \
-          particlesElement.getElementsByTagName("coorX")[0].\
+          particlesInitialConditionElement.getElementsByTagName("coorX")[0].\
             attributes["type"].value
         if particlesCoorXType == "constant":
             self.particlesCoorX = \
-              float(particlesElement.getElementsByTagName("coorX")[0].\
+              float(particlesInitialConditionElement.getElementsByTagName("coorX")[0].\
                     firstChild.data)
         else:
             self.particlesCoorX = str(particlesCoorXType)
         particlesCoorYType = \
-          particlesElement.getElementsByTagName("coorY")[0].\
+          particlesInitialConditionElement.getElementsByTagName("coorY")[0].\
             attributes["type"].value
         if particlesCoorYType == "constant":
             self.particlesCoorY = \
-              float(particlesElement.getElementsByTagName("coorY")[0].\
+              float(particlesInitialConditionElement.getElementsByTagName("coorY")[0].\
                     firstChild.data)
         else:
             self.particlesCoorY = str(particlesCoorYType)
         particlesCoorZType = \
-          particlesElement.getElementsByTagName("coorZ")[0].\
+          particlesInitialConditionElement.getElementsByTagName("coorZ")[0].\
             attributes["type"].value
         if particlesCoorZType == "constant":
             self.particlesCoorZ = \
-              float(particlesElement.getElementsByTagName("coorZ")[0].\
+              float(particlesInitialConditionElement.getElementsByTagName("coorZ")[0].\
                     firstChild.data)
         else:
             self.particlesCoorZ = str(particlesCoorZType)
-        # Velocities
+        # - Velocities
         particlesVelocityXType = \
-          particlesElement.getElementsByTagName("velocityX")[0].\
+          particlesInitialConditionElement.getElementsByTagName("velocityX")[0].\
             attributes["type"].value
-        if particlesVelocityXType == "constant":
+        if particlesVelocityXType == "uniform":
             self.particlesVelocityX = \
-              float(particlesElement.getElementsByTagName("velocityX")[0].\
+              float(particlesInitialConditionElement.getElementsByTagName("velocityX")[0].\
                     firstChild.data)
         else:
             self.particlesVelocityX = str(particlesVelocityXType)
         particlesVelocityYType = \
-          particlesElement.getElementsByTagName("velocityY")[0].\
+          particlesInitialConditionElement.getElementsByTagName("velocityY")[0].\
             attributes["type"].value
-        if particlesVelocityYType == "constant":
+        if particlesVelocityYType == "uniform":
             self.particlesVelocityY = \
-              float(particlesElement.getElementsByTagName("velocityY")[0].\
+              float(particlesInitialConditionElement.getElementsByTagName("velocityY")[0].\
                     firstChild.data)
         else:
             self.particlesVelocityY = str(particlesVelocityYType)
         particlesVelocityZType = \
-          particlesElement.getElementsByTagName("velocityZ")[0].\
+          particlesInitialConditionElement.getElementsByTagName("velocityZ")[0].\
             attributes["type"].value
-        if particlesVelocityZType == "constant":
+        if particlesVelocityZType == "uniform":
             self.particlesVelocityZ = \
-              float(particlesElement.getElementsByTagName("velocityZ")[0].\
+              float(particlesInitialConditionElement.getElementsByTagName("velocityZ")[0].\
                     firstChild.data)
         else:
             self.particlesVelocityZ = str(particlesVelocityZType)
-        # Diameter
+        # - Diameter
         particlesDiameterType = \
-          particlesElement.getElementsByTagName("diameter")[0].\
+          particlesInitialConditionElement.getElementsByTagName("diameter")[0].\
             attributes["type"].value
-        if particlesDiameterType == "constant":
+        if particlesDiameterType == "uniform":
             self.particlesDiameter = \
-              float(particlesElement.getElementsByTagName("diameter")[0].\
+              float(particlesInitialConditionElement.getElementsByTagName("diameter")[0].\
                     firstChild.data)
         else:
             self.particlesDiameter = str(particlesDiameterType)
-        # Mass
-        particlesMassType = \
-          particlesElement.getElementsByTagName("density")[0].\
+        # - Density
+        particlesDensityType = \
+          particlesInitialConditionElement.getElementsByTagName("density")[0].\
             attributes["type"].value
-        if particlesMassType == "constant":
-            self.particlesMass = \
-              float(particlesElement.getElementsByTagName("density")[0].\
+        if particlesDensityType == "uniform":
+            self.particlesDensity = \
+              float(particlesInitialConditionElement.getElementsByTagName("density")[0].\
                     firstChild.data)
         else:
-            self.particlesMass = str(particlesMassType)
+            self.particlesDensity = str(particlesDensityType)
+        # - Temperature
+        particlesTemperatureType = \
+          particlesInitialConditionElement.getElementsByTagName("temperature")[0].\
+            attributes["type"].value
+        if particlesTemperatureType == "uniform":
+            self.particlesTemperature = \
+              float(particlesInitialConditionElement.getElementsByTagName("temperature")[0].\
+                    firstChild.data)
+        else:
+            self.particlesTemperature = str(particlesTemperatureType)
+        # Body force
+        particlesBodyForceType = \
+          particlesElement.getElementsByTagName("bodyForce")[0].\
+            attributes["type"].value
+        if particlesBodyForceType == "constant":
+            self.particlesBodyForceType = particlesBodyForceType
+            self.particlesBodyForce = \
+              numpy.array([float(elem) for elem in\
+                particlesElement.getElementsByTagName("bodyForce")[0].\
+                firstChild.data.split()])
+        else:
+            self.particlesBodyForceType = str(particlesBodyForceType)
+        self.particlesHeatCapacity = \
+          float(particlesElement.getElementsByTagName("heatCapacity")[0].\
+                firstChild.data)
+        self.particlesConvectionCoefficient = \
+          float(particlesElement.getElementsByTagName("convectionCoefficient")[0].\
+                firstChild.data)
 
 
 # -----------------------------------------------------------------------------
@@ -2480,11 +2683,13 @@ def WriteOutput(timeIntegrator, outputFileNamePrefix):
                   'velocity', \
                   'pressure', \
                   'temperature']
+    counter = -1
     for field in fields:
+        counter += 1
         outputArray = field.data[:,:,sliceIndex]
         outputFileName = outputFileNamePrefix + \
                          "_" + str(timeIntegrator.timeStep).zfill(8) + \
-                         "_rho"
+                         "_" + fieldNames[counter]
         field.WriteSlice(2,sliceIndex,outputFileName,includeGhost=True)
 
     # Write output from particle distribution
@@ -2588,8 +2793,13 @@ def main(argv=None):
                                          xmlOptions.particlesVelocityX,
                                          xmlOptions.particlesVelocityY,
                                          xmlOptions.particlesVelocityZ,
+                                         xmlOptions.particlesTemperature,
                                          xmlOptions.particlesDiameter,
-                                         xmlOptions.particlesMass)
+                                         xmlOptions.particlesDensity,
+                                         xmlOptions.particlesBodyForceType,
+                                         xmlOptions.particlesBodyForce,
+                                         xmlOptions.particlesHeatCapacity,
+                                         xmlOptions.particlesConvectionCoefficient)
 
         # Set velocity of particles to local flow velocity
         #particles.SetVelocitiesToFlow(flow)

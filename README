@@ -13,14 +13,16 @@ $ python soleil.py \
     ../TaylorGreen/output
 Output files will be written under the ./TaylorGreen/ directory.
 
-2) Visualize density field on slice with particles superimposed by circles with
-velocity indicated by arrows:
+2) Visualize temperature field on slice with particles superimposed by circles with
+velocity indicated by arrows (circles and arrows will be colored with the
+corresponding particle temperature):
 $ for timeStep in `seq 1 1 100`;do \
     python plotSoleil.py \
       ../TaylorGreen/output \
       $timeStep \
+      temperature \
       1 1e4 10 \
-      ../TaylorGreen/plot; \
+      ../TaylorGreen/plot_temperature; \
   done
 
 The sequence of plot files will be in the ../TaylorGreen/ directory,

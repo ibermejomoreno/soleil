@@ -243,10 +243,11 @@ def readMatrix(inputFileName,
 
 inputFileNamePrefix  = sys.argv[1]
 timeStep             = sys.argv[2]
-sliceIndex           = sys.argv[3]
-particlesSizeFactor  = float(sys.argv[4])
-particlesArrowFactor = float(sys.argv[5])
-outputFileNamePrefix = sys.argv[6]
+fieldName            = sys.argv[3]
+sliceIndex           = sys.argv[4]
+particlesSizeFactor  = float(sys.argv[5])
+particlesArrowFactor = float(sys.argv[6])
+outputFileNamePrefix = sys.argv[7]
 
 zeroPadding=8
 
@@ -254,13 +255,16 @@ particlesInputFileName = inputFileNamePrefix + "_" + \
   str(timeStep).zfill(zeroPadding) + "_particles.txt"
 particlesDiameter, particlesDensity, \
   particlesX, particlesY, particlesZ,  \
-  particlesVelocityX, particlesVelocityY, particlesVelocityZ = \
-  numpy.loadtxt(particlesInputFileName, usecols=(1,2,3,4,5,6,7,8), unpack=True)
+  particlesVelocityX, particlesVelocityY, particlesVelocityZ, \
+  particlesTemperature = \
+  numpy.loadtxt(particlesInputFileName, usecols=(1,2,3,4,5,6,7,8,9),
+                unpack=True)
 
-rhoInputFileName = inputFileNamePrefix + "_" + \
-  str(timeStep).zfill(zeroPadding) + "_rho_normalToZ_sliceAtIndex_" + \
+fieldInputFileName = inputFileNamePrefix + "_" + \
+  str(timeStep).zfill(zeroPadding) + "_" + fieldName + \
+  "_normalToZ_sliceAtIndex_" + \
   str(sliceIndex) + ".txt"
-x, y, F = readMatrix(rhoInputFileName)
+x, y, F = readMatrix(fieldInputFileName)
 transpose = True
 if transpose:
     tmp = x
@@ -276,8 +280,8 @@ fieldToPlot = numpy.array(F)
 coorXToPlot = numpy.array(x)
 coorYToPlot = numpy.array(y)
 
-#interp='nearest'
-interp='bilinear'
+interp='nearest'
+#interp='bilinear'
 
 fig = plt.figure(figsize=(8,6))
 fig.suptitle('Density field at slice ' + str(sliceIndex) + ' with particles')
@@ -304,13 +308,15 @@ particlesPlot = \
   plt.scatter(particlesX,particlesY,
               s=particlesSizeFactor*particlesDiameter,
               alpha=0.8,
-              c='k')
+              c=particlesTemperature)
 plt.colorbar(im)
+plt.colorbar(particlesPlot)
 
 # Particles velocity as quiver
 particlesVelocityPlot = \
   plt.quiver(particlesX, particlesY,
              particlesVelocityX, particlesVelocityY,
+             particlesTemperature,
              scale=particlesArrowFactor,
              alpha=0.8)
 
